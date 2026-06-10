@@ -1,0 +1,29 @@
+name: Check Lint Test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  check-lint-test:
+    name: check lint test
+    runs-on: self-hosted
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../target
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v5
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Run cargo test
+        run: cargo test --all-features --all-targets
+
+      - name: Run cargo clippy
+        run: cargo clippy --all-features --all-targets -- -D warnings
