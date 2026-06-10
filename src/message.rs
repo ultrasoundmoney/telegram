@@ -13,7 +13,7 @@ const TRUNCATION_MARKER: &str = "\n[truncated]";
 /// Per-field budget for dynamic key/value and multiline values.
 ///
 /// The default budget keeps one very large value from pushing later fields out
-/// of the message. `UnlimitedUnsafe` is intended for values the caller already
+/// of the message. `Unlimited` is intended for values the caller already
 /// normalized or intentionally allows to dominate whole-message truncation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueBudget {
@@ -22,7 +22,7 @@ pub enum ValueBudget {
     /// Limit this value to the given number of raw text characters.
     Chars(usize),
     /// Leave this value unbounded and rely only on whole-message truncation.
-    UnlimitedUnsafe,
+    Unlimited,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -307,7 +307,7 @@ impl ValueBudget {
         match self {
             Self::Default => truncate_to_char_limit(value, DEFAULT_VALUE_TEXT_MAX_CHARS),
             Self::Chars(limit) => truncate_to_char_limit(value, limit),
-            Self::UnlimitedUnsafe => value.to_string(),
+            Self::Unlimited => value.to_string(),
         }
     }
 }
@@ -577,12 +577,12 @@ mod tests {
     }
 
     #[test]
-    fn unlimited_unsafe_value_budget_uses_whole_message_truncation() {
+    fn unlimited_value_budget_uses_whole_message_truncation() {
         let message = MessageBuilder::plain()
             .error_with_budget(
                 "error",
                 "x".repeat(SEND_MESSAGE_TEXT_MAX_CHARS * 2),
-                ValueBudget::UnlimitedUnsafe,
+                ValueBudget::Unlimited,
             )
             .line("relay submissions disabled until process restart")
             .build();

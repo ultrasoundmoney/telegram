@@ -7,7 +7,7 @@
 //!
 //! Key/value and error values use a conservative per-value budget by default so
 //! one huge value does not hide later, higher-signal fields. Callers that have
-//! already normalized a value can use [`ValueBudget::UnlimitedUnsafe`] on that
+//! already normalized a value can use [`ValueBudget::Unlimited`] on that
 //! specific field and rely on whole-message truncation instead.
 //!
 //! Feature flags:
