@@ -17,7 +17,10 @@ pub struct BlockingTelegramBot {
 impl BlockingTelegramBot {
     pub fn new(token: impl Into<String>, default_chat_id: impl Into<String>) -> Self {
         Self::with_agent(
-            ureq::AgentBuilder::new().timeout(DEFAULT_TIMEOUT).build(),
+            ureq::Agent::config_builder()
+                .timeout_global(Some(DEFAULT_TIMEOUT))
+                .build()
+                .into(),
             token,
             default_chat_id,
         )
@@ -43,7 +46,10 @@ impl BlockingTelegramBot {
 
     pub fn with_timeout(self, timeout: Duration) -> Self {
         Self {
-            agent: ureq::AgentBuilder::new().timeout(timeout).build(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(timeout))
+                .build()
+                .into(),
             ..self
         }
     }
@@ -93,11 +99,11 @@ impl BlockingTelegramBot {
     ) -> Result<SentMessage, Error> {
         let chat_id = options.chat_id.as_deref().unwrap_or(&self.default_chat_id);
         let request = SendMessageRequest::new(chat_id, message, options);
-        let response = self
+        let mut response = self
             .agent
             .post(&self.api_url("sendMessage"))
-            .send_json(serde_json::to_value(request)?)?;
-        let parsed: ApiResponse<SentMessage> = response.into_json()?;
+            .send_json(&request)?;
+        let parsed: ApiResponse<SentMessage> = response.body_mut().read_json()?;
 
         if parsed.ok {
             parsed
