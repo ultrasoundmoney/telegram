@@ -7,6 +7,23 @@ use crate::Error;
 
 pub const CALLBACK_DATA_MAX_BYTES: usize = 64;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(6);
+const DEFAULT_VALUE_TEXT_MAX_CHARS: usize = SEND_MESSAGE_TEXT_MAX_CHARS / 4;
+const TRUNCATION_MARKER: &str = "\n[truncated]";
+
+/// Per-field budget for dynamic key/value and multiline values.
+///
+/// The default budget keeps one very large value from pushing later fields out
+/// of the message. `UnlimitedUnsafe` is intended for values the caller already
+/// normalized or intentionally allows to dominate whole-message truncation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueBudget {
+    /// Use the crate's conservative per-value budget.
+    Default,
+    /// Limit this value to the given number of raw text characters.
+    Chars(usize),
+    /// Leave this value unbounded and rely only on whole-message truncation.
+    UnlimitedUnsafe,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParseMode {
@@ -92,32 +109,75 @@ impl MessageBuilder {
         self
     }
 
-    pub fn kv(mut self, key: impl fmt::Display, value: impl fmt::Display) -> Self {
+    pub fn kv(self, key: impl fmt::Display, value: impl fmt::Display) -> Self {
+        self.kv_with_budget(key, value, ValueBudget::Default)
+    }
+
+    pub fn kv_with_budget(
+        mut self,
+        key: impl fmt::Display,
+        value: impl fmt::Display,
+        budget: ValueBudget,
+    ) -> Self {
         self.blocks.push(Block::KeyValue {
             key: key.to_string(),
-            value: Value::Text(value.to_string()),
+            value: Value::Text {
+                value: value.to_string(),
+                budget,
+            },
         });
         self
     }
 
-    pub fn kv_code(mut self, key: impl fmt::Display, value: impl fmt::Display) -> Self {
+    pub fn kv_code(self, key: impl fmt::Display, value: impl fmt::Display) -> Self {
+        self.kv_code_with_budget(key, value, ValueBudget::Default)
+    }
+
+    pub fn kv_code_with_budget(
+        mut self,
+        key: impl fmt::Display,
+        value: impl fmt::Display,
+        budget: ValueBudget,
+    ) -> Self {
         self.blocks.push(Block::KeyValue {
             key: key.to_string(),
-            value: Value::InlineCode(value.to_string()),
+            value: Value::InlineCode {
+                value: value.to_string(),
+                budget,
+            },
         });
         self
     }
 
-    pub fn error(mut self, key: impl fmt::Display, value: impl fmt::Display) -> Self {
+    pub fn error(self, key: impl fmt::Display, value: impl fmt::Display) -> Self {
+        self.error_with_budget(key, value, ValueBudget::Default)
+    }
+
+    pub fn error_with_budget(
+        mut self,
+        key: impl fmt::Display,
+        value: impl fmt::Display,
+        budget: ValueBudget,
+    ) -> Self {
         self.blocks.push(Block::MultilineValue {
             key: key.to_string(),
             value: value.to_string(),
+            budget,
         });
         self
     }
 
     pub fn code_block(self, key: impl fmt::Display, value: impl fmt::Display) -> Self {
         self.error(key, value)
+    }
+
+    pub fn code_block_with_budget(
+        self,
+        key: impl fmt::Display,
+        value: impl fmt::Display,
+        budget: ValueBudget,
+    ) -> Self {
+        self.error_with_budget(key, value, budget)
     }
 
     pub fn build(self) -> TelegramMessage {
@@ -165,8 +225,15 @@ impl MessageBuilder {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Block {
     Line(TextStyle, String),
-    KeyValue { key: String, value: Value },
-    MultilineValue { key: String, value: String },
+    KeyValue {
+        key: String,
+        value: Value,
+    },
+    MultilineValue {
+        key: String,
+        value: String,
+        budget: ValueBudget,
+    },
 }
 
 impl Block {
@@ -180,16 +247,20 @@ impl Block {
                     value.render(parse_mode)
                 )
             }
-            Self::MultilineValue { key, value } => match parse_mode {
-                ParseMode::Plain => format!("{}:\n{}", plain_text(key), plain_text(value)),
+            Self::MultilineValue { key, value, budget } => match parse_mode {
+                ParseMode::Plain => {
+                    format!("{}:\n{}", plain_text(key), plain_text(&budget.apply(value)))
+                }
                 ParseMode::MarkdownV2 => {
                     format!(
                         "{}:\n{}",
                         markdown_v2::text(key),
-                        markdown_v2::code_block(value)
+                        markdown_v2::code_block(&budget.apply(value))
                     )
                 }
-                ParseMode::Html => format!("{}:\n{}", html::text(key), html::pre(value)),
+                ParseMode::Html => {
+                    format!("{}:\n{}", html::text(key), html::pre(&budget.apply(value)))
+                }
             },
         }
     }
@@ -214,19 +285,29 @@ impl TextStyle {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
-    Text(String),
-    InlineCode(String),
+    Text { value: String, budget: ValueBudget },
+    InlineCode { value: String, budget: ValueBudget },
 }
 
 impl Value {
     fn render(&self, parse_mode: ParseMode) -> String {
         match self {
-            Self::Text(value) => render_text(value, parse_mode),
-            Self::InlineCode(value) => match parse_mode {
-                ParseMode::Plain => plain_text(value),
-                ParseMode::MarkdownV2 => markdown_v2::inline_code(value),
-                ParseMode::Html => html::code(value),
+            Self::Text { value, budget } => render_text(&budget.apply(value), parse_mode),
+            Self::InlineCode { value, budget } => match parse_mode {
+                ParseMode::Plain => plain_text(&budget.apply(value)),
+                ParseMode::MarkdownV2 => markdown_v2::inline_code(&budget.apply(value)),
+                ParseMode::Html => html::code(&budget.apply(value)),
             },
+        }
+    }
+}
+
+impl ValueBudget {
+    fn apply(self, value: &str) -> String {
+        match self {
+            Self::Default => truncate_to_char_limit(value, DEFAULT_VALUE_TEXT_MAX_CHARS),
+            Self::Chars(limit) => truncate_to_char_limit(value, limit),
+            Self::UnlimitedUnsafe => value.to_string(),
         }
     }
 }
@@ -240,14 +321,22 @@ fn render_text(input: &str, parse_mode: ParseMode) -> String {
 }
 
 fn truncate_to_limit(input: &str) -> String {
-    const MARKER: &str = "\n[truncated]";
+    truncate_to_char_limit(input, SEND_MESSAGE_TEXT_MAX_CHARS)
+}
 
-    if char_count(input) <= SEND_MESSAGE_TEXT_MAX_CHARS {
+fn truncate_to_char_limit(input: &str, limit: usize) -> String {
+    if char_count(input) <= limit {
         input.to_string()
     } else {
-        let marker_chars = char_count(MARKER);
-        let keep = SEND_MESSAGE_TEXT_MAX_CHARS.saturating_sub(marker_chars);
-        input.chars().take(keep).chain(MARKER.chars()).collect()
+        let marker_chars = char_count(TRUNCATION_MARKER);
+        let keep = limit.saturating_sub(marker_chars);
+
+        input
+            .chars()
+            .take(keep)
+            .chain(TRUNCATION_MARKER.chars())
+            .take(limit)
+            .collect()
     }
 }
 
@@ -441,6 +530,85 @@ mod tests {
         assert_eq!(message.parse_mode(), ParseMode::Plain);
         assert_eq!(char_count(message.text()), SEND_MESSAGE_TEXT_MAX_CHARS);
         assert!(message.text().ends_with("\n[truncated]"));
+    }
+
+    #[test]
+    fn default_value_budget_preserves_later_fields() {
+        let message = MessageBuilder::plain()
+            .error("error", "x".repeat(SEND_MESSAGE_TEXT_MAX_CHARS))
+            .line("relay submissions disabled until process restart")
+            .build();
+
+        assert_eq!(message.parse_mode(), ParseMode::Plain);
+        assert!(message.text().contains("\n[truncated]"));
+        assert!(
+            message
+                .text()
+                .contains("relay submissions disabled until process restart")
+        );
+        assert!(char_count(message.text()) < SEND_MESSAGE_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn default_key_value_budget_preserves_later_key_values() {
+        let message = MessageBuilder::plain()
+            .kv("large", "x".repeat(SEND_MESSAGE_TEXT_MAX_CHARS))
+            .kv("small", "high-signal")
+            .build();
+
+        assert!(message.text().contains("large: "));
+        assert!(message.text().contains("\n[truncated]"));
+        assert!(message.text().contains("small: high-signal"));
+    }
+
+    #[test]
+    fn custom_value_budget_is_honored() {
+        let message = MessageBuilder::plain()
+            .kv_with_budget("payload", "abcdef", ValueBudget::Chars(16))
+            .build();
+
+        assert_eq!(message.text(), "payload: abcdef");
+
+        let message = MessageBuilder::plain()
+            .kv_with_budget("payload", "abcdefghijklmnopqrstu", ValueBudget::Chars(16))
+            .build();
+
+        assert_eq!(message.text(), "payload: abcd\n[truncated]");
+    }
+
+    #[test]
+    fn unlimited_unsafe_value_budget_uses_whole_message_truncation() {
+        let message = MessageBuilder::plain()
+            .error_with_budget(
+                "error",
+                "x".repeat(SEND_MESSAGE_TEXT_MAX_CHARS * 2),
+                ValueBudget::UnlimitedUnsafe,
+            )
+            .line("relay submissions disabled until process restart")
+            .build();
+
+        assert_eq!(char_count(message.text()), SEND_MESSAGE_TEXT_MAX_CHARS);
+        assert!(message.text().ends_with("\n[truncated]"));
+        assert!(
+            !message
+                .text()
+                .contains("relay submissions disabled until process restart")
+        );
+    }
+
+    #[test]
+    fn budgeted_markdown_code_block_keeps_complete_delimiters() {
+        let message = MessageBuilder::markdown_v2()
+            .error(
+                "error",
+                format!("`{}", "x".repeat(SEND_MESSAGE_TEXT_MAX_CHARS)),
+            )
+            .line("tail")
+            .build();
+
+        assert_eq!(message.parse_mode(), ParseMode::MarkdownV2);
+        assert!(message.text().contains("```\n\\`"));
+        assert!(message.text().contains("\n[truncated]\n```\ntail"));
     }
 
     #[test]

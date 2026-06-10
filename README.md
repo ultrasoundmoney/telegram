@@ -13,6 +13,11 @@ It owns the final Telegram message before sending, so it can apply the
 `sendMessage.text` limit to the full message instead of pretending fragment-level
 sanitation can guarantee delivery.
 
+Key/value and error values use a conservative per-value budget by default. This
+keeps one huge value from hiding later fields. If a caller has already
+normalized a value, it can opt that specific field out with
+`ValueBudget::UnlimitedUnsafe` and rely on whole-message truncation instead.
+
 ## Features
 
 ```toml
@@ -50,6 +55,18 @@ let message = MessageBuilder::new(ParseMode::MarkdownV2)
     .bold_line("builder demoted")
     .kv_code("slot", 12345)
     .error("error", "simulation failed:\ninvalid `root`")
+    .build();
+```
+
+Caller-controlled value budget:
+
+```rust
+use telegram::{MessageBuilder, ParseMode, ValueBudget};
+
+let compact_error = "caller already summarized this error";
+let message = MessageBuilder::new(ParseMode::Plain)
+    .kv("label", "rbx-prod-mainnet")
+    .error_with_budget("error", compact_error, ValueBudget::UnlimitedUnsafe)
     .build();
 ```
 
