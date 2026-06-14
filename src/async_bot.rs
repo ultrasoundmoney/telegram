@@ -4,6 +4,7 @@ use crate::{
     ApiResponse, DEFAULT_TIMEOUT, Error, ParseFailureFallback, ParseMode, SendMessageRequest,
     SendOptions, SentMessage, TelegramMessage, fallback_plain_message,
 };
+use tracing::{debug, error, info, instrument, warn};
 
 /// Async Telegram `sendMessage` client.
 #[derive(Clone)]
@@ -69,17 +70,48 @@ impl TelegramBot {
         message: &TelegramMessage,
         options: SendOptions,
     ) -> Result<SentMessage, Error> {
+        self.send_with_options_inner(message, options).await
+    }
+
+    #[instrument(
+        name = "telegram.send_message",
+        skip_all,
+        fields(
+            telegram.transport = "async",
+            telegram.parse_mode = ?message.parse_mode(),
+            telegram.text_chars = message.text().chars().count(),
+            telegram.chat_override = options.chat_id.is_some(),
+            telegram.message_thread_id = options.message_thread_id,
+            telegram.has_reply_markup = options.reply_markup.is_some(),
+        )
+    )]
+    async fn send_with_options_inner(
+        &self,
+        message: &TelegramMessage,
+        options: SendOptions,
+    ) -> Result<SentMessage, Error> {
+        info!("sending telegram message");
         let result = self.send_once(message, &options).await;
 
         if should_retry_plain(message, &options, &result) {
+            if let Err(error) = &result {
+                warn!(
+                    telegram.error_kind = error.kind(),
+                    "telegram send failed; retrying without parse mode"
+                );
+            }
+
             let fallback = fallback_plain_message(message);
             let fallback_options = SendOptions {
                 parse_failure_fallback: ParseFailureFallback::None,
                 ..options
             };
 
-            self.send_once(&fallback, &fallback_options).await
+            let fallback_result = self.send_once(&fallback, &fallback_options).await;
+            log_send_result(&fallback_result, true);
+            fallback_result
         } else {
+            log_send_result(&result, false);
             result
         }
     }
@@ -91,6 +123,7 @@ impl TelegramBot {
     ) -> Result<SentMessage, Error> {
         let chat_id = options.chat_id.as_deref().unwrap_or(&self.default_chat_id);
         let request = SendMessageRequest::new(chat_id, message, options);
+        debug!("posting telegram sendMessage request");
         let response = self
             .client
             .post(self.api_url("sendMessage"))
@@ -99,29 +132,55 @@ impl TelegramBot {
             .send()
             .await?;
         let status = response.status();
+        debug!(http.status = status.as_u16(), "received telegram response");
         let body = response.text().await?;
 
         if !status.is_success() {
+            warn!(
+                http.status = status.as_u16(),
+                telegram.response_chars = body.chars().count(),
+                "telegram api returned non-success http status"
+            );
             return Err(Error::Telegram(body));
         }
 
         let parsed: ApiResponse<SentMessage> = serde_json::from_str(&body)?;
 
         if parsed.ok {
-            parsed
-                .result
-                .ok_or_else(|| Error::Telegram("sendMessage returned no result".to_string()))
+            parsed.result.ok_or_else(|| {
+                warn!("telegram api response did not include a message result");
+                Error::Telegram("sendMessage returned no result".to_string())
+            })
         } else {
-            Err(Error::Telegram(
-                parsed
-                    .description
-                    .unwrap_or_else(|| "unknown error".to_string()),
-            ))
+            let description = parsed
+                .description
+                .unwrap_or_else(|| "unknown error".to_string());
+            warn!(telegram.error = %description, "telegram api returned an error");
+            Err(Error::Telegram(description))
         }
     }
 
     fn api_url(&self, method: &str) -> String {
         format!("{}/bot{}/{}", self.base_url, self.token, method)
+    }
+}
+
+fn log_send_result(result: &Result<SentMessage, Error>, used_plain_fallback: bool) {
+    match result {
+        Ok(message) => {
+            info!(
+                telegram.message_id = message.message_id,
+                telegram.used_plain_fallback = used_plain_fallback,
+                "sent telegram message"
+            );
+        }
+        Err(error) => {
+            error!(
+                telegram.error_kind = error.kind(),
+                telegram.used_plain_fallback = used_plain_fallback,
+                "failed to send telegram message"
+            );
+        }
     }
 }
 

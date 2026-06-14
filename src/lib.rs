@@ -30,6 +30,12 @@
 mod error;
 mod message;
 
+/// Version of this `telegram` crate, from `Cargo.toml`.
+///
+/// Services can include this in their own startup logs to make git-tagged
+/// internal releases visible at runtime.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[cfg(feature = "async")]
 mod async_bot;
 

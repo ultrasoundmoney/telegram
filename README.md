@@ -29,6 +29,31 @@ blocking = ["ureq"]
 The default async transport uses `reqwest`. The optional blocking transport uses
 `ureq`.
 
+## Logging
+
+The send clients emit structured [`tracing`](https://docs.rs/tracing/) spans and
+events. Callers decide whether those events are recorded by installing their own
+subscriber.
+
+The crate logs send attempts, successful message ids, API and HTTP failures, and
+formatted-message fallback retries. Logs intentionally avoid tokens, request
+URLs, chat ids, and message text.
+
+## Version Tracking
+
+The crate exposes its package version as `telegram::VERSION`:
+
+```rust
+tracing::info!(telegram.version = telegram::VERSION, "loaded telegram crate");
+```
+
+For internal services that depend on this repository directly, prefer pinning a
+release tag:
+
+```toml
+telegram = { git = "https://github.com/ultrasoundmoney/telegram", tag = "v0.2.0" }
+```
+
 ## Examples
 
 Plain alert:

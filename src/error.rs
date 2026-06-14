@@ -28,6 +28,18 @@ impl fmt::Display for Error {
 
 impl error::Error for Error {}
 
+impl Error {
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::CallbackDataTooLong { .. } => "callback_data_too_long",
+            Self::MessageTooLong { .. } => "message_too_long",
+            Self::Http(_) => "http",
+            Self::Telegram(_) => "telegram",
+            Self::Json(_) => "json",
+        }
+    }
+}
+
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error.to_string())
@@ -43,7 +55,7 @@ impl From<std::io::Error> for Error {
 #[cfg(feature = "async")]
 impl From<reqwest::Error> for Error {
     fn from(error: reqwest::Error) -> Self {
-        Self::Http(error.to_string())
+        Self::Http(error.without_url().to_string())
     }
 }
 
